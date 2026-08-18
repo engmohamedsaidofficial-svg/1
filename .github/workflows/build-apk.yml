@@ -1,40 +1,40 @@
 name: Build Android APK
-
+ 
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
-
+ 
 permissions:
   contents: read
-
+ 
 jobs:
   build:
     runs-on: ubuntu-latest
-
+ 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+ 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-
+ 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
-
+ 
       - name: Install dependencies
         run: npm install
-
+ 
       # Replace TypeScript Capacitor config with JSON config
       - name: Prepare Capacitor configuration
         run: |
           rm -f capacitor.config.ts
-
+ 
           cat > capacitor.config.json <<'EOF'
           {
             "appId": "com.azkar.app",
@@ -42,39 +42,42 @@ jobs:
             "webDir": "www"
           }
           EOF
-
+ 
       - name: Add Android platform
         run: npx cap add android
-
+ 
       - name: Sync Capacitor
         run: npx cap sync android
-
+ 
       - name: Add vibration and notification permissions
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
+ 
           p = Path("android/app/src/main/AndroidManifest.xml")
           s = p.read_text()
-
+ 
           marker = '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
-
+ 
           permissions = '''<uses-permission android:name="android.permission.VIBRATE" />
-          <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />'''
-
+          <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+          <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+          <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+          <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />'''
+ 
           if "android.permission.VIBRATE" not in s:
               s = s.replace(
                   marker,
                   marker + "\n    " + permissions
               )
-
+ 
           p.write_text(s)
           PY
-
+ 
       - name: Build APK
         working-directory: android
         run: ./gradlew assembleDebug
-
+ 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
