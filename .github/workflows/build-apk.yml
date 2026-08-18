@@ -13,36 +13,33 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout repository
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Setup Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      # Setup Java
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      # Install npm dependencies
       - name: Install dependencies
         run: npm install
 
-      # Add Android platform
+      # Required because capacitor.config.ts is used
+      - name: Install TypeScript
+        run: npm install --save-dev typescript
+
       - name: Add Android platform
         run: npx cap add android
 
-      # Sync Capacitor
       - name: Sync Capacitor
         run: npx cap sync android
 
-      # Add vibration and notification permissions
       - name: Add vibration and notification permissions
         run: |
           python3 - <<'PY'
@@ -65,12 +62,10 @@ jobs:
           p.write_text(s)
           PY
 
-      # Build Debug APK
       - name: Build APK
         working-directory: android
         run: ./gradlew assembleDebug
 
-      # Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
