@@ -52,26 +52,39 @@ jobs:
       - name: Add vibration and notification permissions
         run: |
           python3 - <<'PY'
+          import re, sys
           from pathlib import Path
  
           p = Path("android/app/src/main/AndroidManifest.xml")
           s = p.read_text()
  
-          marker = '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
+          permissions = '''    <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+              <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+          '''
  
-          permissions = '''<uses-permission android:name="android.permission.VIBRATE" />
-          <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-          <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-          <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
-          <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />'''
+          if "android.permission.POST_NOTIFICATIONS" not in s:
+              # يطابق أول وسم <manifest ...> مهما كانت صفاته أو تنسيقه، بدل نص ثابت هش
+              match = re.search(r'<manifest\b[^>]*>', s)
+              if not match:
+                  print("ERROR: <manifest> tag not found in AndroidManifest.xml")
+                  sys.exit(1)
+              insert_at = match.end()
+              s = s[:insert_at] + "\n" + permissions + s[insert_at:]
+              p.write_text(s)
+              print("Permissions inserted successfully.")
+          else:
+              print("Permissions already present, skipping.")
  
-          if "android.permission.VIBRATE" not in s:
-              s = s.replace(
-                  marker,
-                  marker + "\n    " + permissions
-              )
- 
-          p.write_text(s)
+          # تحقق نهائي: افشل الـ build بوضوح لو الصلاحية المهمة مش موجودة فعليًا في الملف الناتج
+          final = p.read_text()
+          required = ["POST_NOTIFICATIONS", "SCHEDULE_EXACT_ALARM", "VIBRATE"]
+          missing = [r for r in required if r not in final]
+          if missing:
+              print("ERROR: missing permissions after patch: " + ", ".join(missing))
+              sys.exit(1)
           PY
  
       - name: Build APK
