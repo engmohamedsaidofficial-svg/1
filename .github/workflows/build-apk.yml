@@ -48,9 +48,15 @@ jobs:
           }
           EOF
 
-      # إضافة Android
+      # إضافة Android إذا لم يكن موجودًا
       - name: Add Android platform
-        run: npx cap add android
+        run: |
+          if [ -d "android" ]; then
+            echo "Android platform already exists. Skipping cap add android."
+          else
+            echo "Android platform not found. Adding it now..."
+            npx cap add android
+          fi
 
       # إنشاء أيقونة التطبيق
       - name: Generate app icon
