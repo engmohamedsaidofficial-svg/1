@@ -1,52 +1,57 @@
 name: Build Android APK
- 
+
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
- 
+
 permissions:
   contents: read
- 
+
 jobs:
   build:
     runs-on: ubuntu-latest
- 
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
- 
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
- 
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
- 
+
       - name: Install dependencies
         run: npm install
- 
+
       # إعداد Capacitor
       - name: Prepare Capacitor configuration
         run: |
           rm -f capacitor.config.ts
- 
+
           cat > capacitor.config.json <<'EOF'
           {
             "appId": "com.azkar.app",
             "appName": "أذكار",
-            "webDir": "www"
+            "webDir": "www",
+            "plugins": {
+              "LocalNotifications": {
+                "smallIcon": "ic_stat_azkar"
+              }
+            }
           }
           EOF
- 
+
       # إضافة Android
       - name: Add Android platform
         run: npx cap add android
- 
+
       # إنشاء أيقونة التطبيق
       - name: Generate app icon
         run: |
@@ -54,42 +59,62 @@ jobs:
             --android \
             --iconBackgroundColor '#0b3d24' \
             --iconBackgroundColorDark '#0b3d24'
- 
-      # مزامنة ملفات التطبيق
+
+      # =========================================================
+      # تثبيت أيقونة الإشعارات
+      # =========================================================
+      - name: Install notification small icon
+        run: |
+          set -e
+
+          if [ ! -f "www/ic_stat_azkar.png" ]; then
+            echo "ERROR: www/ic_stat_azkar.png not found!"
+            exit 1
+          fi
+
+          mkdir -p android/app/src/main/res/drawable
+
+          cp "www/ic_stat_azkar.png" \
+             "android/app/src/main/res/drawable/ic_stat_azkar.png"
+
+          echo "Notification icon installed successfully:"
+          ls -lh android/app/src/main/res/drawable/ic_stat_azkar.png
+
+      # مزامنة Capacitor
       - name: Sync Capacitor
         run: npx cap sync android
- 
+
       # =========================================================
       # نسخ نغمات الصلاة إلى Android
       # =========================================================
       - name: Install prayer notification sounds
         run: |
           set -e
- 
+
           echo "Checking prayer audio files..."
- 
+
           if [ ! -f "www/audio/before5.mp3" ]; then
             echo "ERROR: www/audio/before5.mp3 not found!"
             exit 1
           fi
- 
+
           if [ ! -f "www/audio/azan.mp3" ]; then
             echo "ERROR: www/audio/azan.mp3 not found!"
             exit 1
           fi
- 
+
           mkdir -p android/app/src/main/res/raw
- 
+
           cp "www/audio/before5.mp3" \
              "android/app/src/main/res/raw/before5.mp3"
- 
+
           cp "www/audio/azan.mp3" \
              "android/app/src/main/res/raw/azan.mp3"
- 
+
           echo "Audio files copied successfully:"
           ls -lh android/app/src/main/res/raw/before5.mp3
           ls -lh android/app/src/main/res/raw/azan.mp3
- 
+
       # =========================================================
       # صلاحيات الإشعارات والاهتزاز والمنبهات
       # =========================================================
@@ -99,10 +124,10 @@ jobs:
           import re
           import sys
           from pathlib import Path
- 
+
           p = Path("android/app/src/main/AndroidManifest.xml")
           s = p.read_text()
- 
+
           permissions = """
               <uses-permission android:name="android.permission.VIBRATE" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -110,35 +135,34 @@ jobs:
               <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
               <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
           """
- 
+
           required_permission = "android.permission.POST_NOTIFICATIONS"
- 
+
           if required_permission not in s:
               match = re.search(r"<manifest\b[^>]*>", s)
- 
+
               if not match:
                   print("ERROR: <manifest> tag not found")
                   sys.exit(1)
- 
+
               insert_at = match.end()
- 
+
               s = (
                   s[:insert_at]
                   + "\n"
                   + permissions
                   + s[insert_at:]
               )
- 
+
               p.write_text(s)
- 
+
               print("Android permissions added successfully.")
- 
+
           else:
               print("Android permissions already exist.")
- 
-          # التحقق النهائي
+
           final = p.read_text()
- 
+
           required = [
               "android.permission.VIBRATE",
               "android.permission.POST_NOTIFICATIONS",
@@ -146,30 +170,44 @@ jobs:
               "android.permission.USE_EXACT_ALARM",
               "android.permission.RECEIVE_BOOT_COMPLETED"
           ]
- 
+
           missing = [
               permission
               for permission in required
               if permission not in final
           ]
- 
+
           if missing:
               print("ERROR: Missing permissions:")
+
               for permission in missing:
                   print(" - " + permission)
- 
+
               sys.exit(1)
- 
+
           print("All required permissions are present.")
           PY
- 
+
+      # =========================================================
+      # التحقق من أيقونة الإشعارات
+      # =========================================================
+      - name: Verify notification icon
+        run: |
+          set -e
+
+          test -f "android/app/src/main/res/drawable/ic_stat_azkar.png"
+
+          grep -q '"smallIcon": "ic_stat_azkar"' capacitor.config.json
+
+          echo "Notification small icon verified successfully."
+
       # =========================================================
       # بناء APK
       # =========================================================
       - name: Build APK
         working-directory: android
         run: ./gradlew assembleDebug
- 
+
       # =========================================================
       # رفع APK كـ Artifact
       # =========================================================
