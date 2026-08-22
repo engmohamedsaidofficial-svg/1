@@ -1,40 +1,40 @@
 name: Build Android APK
-
+ 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-
+    branches: [ main ]
+ 
 permissions:
   contents: read
-
+ 
 jobs:
   build:
     runs-on: ubuntu-latest
-
+ 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+ 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-
+ 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
-
+          java-version: '21'
+ 
       - name: Install dependencies
         run: npm install
-
+ 
+      # إعداد Capacitor
       - name: Prepare Capacitor configuration
         run: |
           rm -f capacitor.config.ts
-
+ 
           cat > capacitor.config.json <<'EOF'
           {
             "appId": "com.azkar.app",
@@ -47,270 +47,179 @@ jobs:
             }
           }
           EOF
-
+ 
+      # إضافة Android إذا لم يكن موجودًا
       - name: Add Android platform
         run: |
           if [ -d "android" ]; then
-            echo "Android platform already exists."
+            echo "Android platform already exists. Skipping cap add android."
           else
+            echo "Android platform not found. Adding it now..."
             npx cap add android
           fi
-
+ 
+      # إنشاء أيقونة التطبيق
+      - name: Generate app icon
+        run: |
+          npx @capacitor/assets generate \
+            --android \
+            --iconBackgroundColor '#0b3d24' \
+            --iconBackgroundColorDark '#0b3d24'
+ 
       # =========================================================
-      # إصلاح جدولة تنبيهات الأذان
-      # الجدولة تصبح لمدة 7 أيام بدلا من يوم واحد
+      # تثبيت أيقونة الإشعارات
       # =========================================================
-
-      - name: Patch prayer notification scheduling
+      - name: Install notification small icon
         run: |
           set -e
-
-          python3 <<'PY'
+ 
+          if [ ! -f "www/ic_stat_azkar.png" ]; then
+            echo "ERROR: www/ic_stat_azkar.png not found!"
+            exit 1
+          fi
+ 
+          mkdir -p android/app/src/main/res/drawable
+ 
+          cp "www/ic_stat_azkar.png" \
+             "android/app/src/main/res/drawable/ic_stat_azkar.png"
+ 
+          echo "Notification icon installed successfully:"
+          ls -lh android/app/src/main/res/drawable/ic_stat_azkar.png
+ 
+      # مزامنة Capacitor
+      - name: Sync Capacitor
+        run: npx cap sync android
+ 
+      # =========================================================
+      # نسخ نغمات الصلاة إلى Android
+      # =========================================================
+      - name: Install prayer notification sounds
+        run: |
+          set -e
+ 
+          echo "Checking prayer audio files..."
+ 
+          if [ ! -f "www/audio/before5.mp3" ]; then
+            echo "ERROR: www/audio/before5.mp3 not found!"
+            exit 1
+          fi
+ 
+          if [ ! -f "www/audio/azan.mp3" ]; then
+            echo "ERROR: www/audio/azan.mp3 not found!"
+            exit 1
+          fi
+ 
+          mkdir -p android/app/src/main/res/raw
+ 
+          cp "www/audio/before5.mp3" \
+             "android/app/src/main/res/raw/before5.mp3"
+ 
+          cp "www/audio/azan.mp3" \
+             "android/app/src/main/res/raw/azan.mp3"
+ 
+          echo "Audio files copied successfully:"
+          ls -lh android/app/src/main/res/raw/before5.mp3
+          ls -lh android/app/src/main/res/raw/azan.mp3
+ 
+      # =========================================================
+      # صلاحيات الإشعارات والاهتزاز والمنبهات
+      # =========================================================
+      - name: Add Android permissions
+        run: |
+          python3 - <<'PY'
+          import re
+          import sys
           from pathlib import Path
-
-          path = Path("www/index.html")
-          source = path.read_text(encoding="utf-8")
-
-          marker = "function schedulePrayerAlerts(times){"
-          start = source.find(marker)
-
-          if start == -1:
-              raise SystemExit(
-                  "ERROR: schedulePrayerAlerts(times) not found"
+ 
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+ 
+          permissions = """
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+              <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+          """
+ 
+          required_permission = "android.permission.POST_NOTIFICATIONS"
+ 
+          if required_permission not in s:
+              match = re.search(r"<manifest\b[^>]*>", s)
+ 
+              if not match:
+                  print("ERROR: <manifest> tag not found")
+                  sys.exit(1)
+ 
+              insert_at = match.end()
+ 
+              s = (
+                  s[:insert_at]
+                  + "\n"
+                  + permissions
+                  + s[insert_at:]
               )
-
-          brace_start = source.find("{", start)
-
-          if brace_start == -1:
-              raise SystemExit(
-                  "ERROR: opening brace not found"
-              )
-
-          # تحديد نهاية الدالة عن طريق عد الأقواس
-          depth = 0
-          end = None
-
-          in_string = None
-          escaped = False
-          line_comment = False
-          block_comment = False
-
-          i = brace_start
-
-          while i < len(source):
-
-              c = source[i]
-              n = source[i + 1] if i + 1 < len(source) else ""
-
-              if line_comment:
-                  if c == "\n":
-                      line_comment = False
-                  i += 1
-                  continue
-
-              if block_comment:
-                  if c == "*" and n == "/":
-                      block_comment = False
-                      i += 2
-                      continue
-                  i += 1
-                  continue
-
-              if in_string:
-                  if escaped:
-                      escaped = False
-                  elif c == "\\":
-                      escaped = True
-                  elif c == in_string:
-                      in_string = None
-                  i += 1
-                  continue
-
-              if c == "/" and n == "/":
-                  line_comment = True
-                  i += 2
-                  continue
-
-              if c == "/" and n == "*":
-                  block_comment = True
-                  i += 2
-                  continue
-
-              if c in ("'", '"', "`"):
-                  in_string = c
-                  i += 1
-                  continue
-
-              if c == "{":
-                  depth += 1
-
-              elif c == "}":
-                  depth -= 1
-
-                  if depth == 0:
-                      end = i + 1
-                      break
-
-              i += 1
-
-          if end is None:
-              raise SystemExit(
-                  "ERROR: Could not find end of schedulePrayerAlerts()"
-              )
-
-          new_function = r'''function schedulePrayerAlerts(times){
-    clearPrayerAlertTimeouts();
-
-    if (!times) return;
-
-    var alerts = loadPrayerAlerts();
-
-    var native = isNativeApp();
-    var plugin = native ? getLocalNotifPlugin() : null;
-
-    if (plugin) {
-      ensureNotifChannels();
-    }
-
-    var enabled = Object.keys(alerts).some(function(key){
-      return alerts[key] && alerts[key] !== 'off';
-    });
-
-    if (!enabled) return;
-
-    /*
-     * استخدام مواقيت الأسبوع الموجودة في الكاش.
-     */
-    var weekly = null;
-
-    try {
-      weekly = JSON.parse(
-        localStorage.getItem('pt_weekly_cache') || 'null'
-      );
-    } catch(e) {
-      weekly = null;
-    }
-
-    var savedCity = null;
-
-    try {
-      savedCity = JSON.parse(
-        localStorage.getItem('pt_saved_city') || 'null'
-      );
-    } catch(e) {}
-
-    var cityKey = null;
-
-    if (savedCity) {
-      try {
-        cityKey =
-          Number(savedCity.lat).toFixed(3) +
-          '_' +
-          Number(savedCity.lng).toFixed(3);
-      } catch(e) {}
-    }
-
-    if (
-      !weekly ||
-      !weekly.days ||
-      !cityKey ||
-      weekly.cityKey !== cityKey
-    ) {
-      weekly = null;
-    }
-
-    var now = new Date();
-
-    var notifications = [];
-
-    /*
-     * ID مستقل لكل:
-     * اليوم + الصلاة + نوع التنبيه
-     *
-     * 7 أيام
-     * 6 صلوات
-     * تنبيه قبل / تنبيه وقت الأذان
-     */
-    function prayerNotificationId(
-      dayIndex,
-      prayerIndex,
-      kind
-    ) {
-      return 100000 +
-        (dayIndex * 100) +
-        (prayerIndex * 10) +
-        (kind === 'before' ? 1 : 2);
-    }
-
-    /*
-     * جدولة 7 أيام قادمة
-     */
-    for (
-      var dayIndex = 0;
-      dayIndex < 7;
-      dayIndex++
-    ) {
-
-      var date = new Date(
-        now.getFullYear(),
-        now.getMonth(),
-        now.getDate() + dayIndex
-      );
-
-      var dayKey = date.toDateString();
-
-      var dayTimes = null;
-
-      /*
-       * استخدم الكاش للأيام القادمة.
-       * اليوم الحالي يستخدم times كاحتياط.
-       */
-      if (
-        weekly &&
-        weekly.days &&
-        weekly.days[dayKey]
-      ) {
-        dayTimes = weekly.days[dayKey];
-
-      } else if (dayIndex === 0) {
-
-        dayTimes = times;
-      }
-
-      if (!dayTimes) continue;
-
-      PRAYER_LIST.forEach(
-        function(prayer, prayerIndex){
-
-          /*
-           * الشروق ليس له تنبيه أذان.
-           */
-          if (prayer.key === 'sunrise') {
-            return;
-          }
-
-          var mode = alerts[prayer.key];
-
-          if (!mode || mode === 'off') {
-            return;
-          }
-
-          var t = dayTimes[prayer.key];
-
-          if (!t) return;
-
-          var prayerDate = new Date(
-            date.getFullYear(),
-            date.getMonth(),
-            date.getDate(),
-            Number(t.h),
-            Number(t.m),
-            0,
-            0
-          );
-
-          /*
-           * تنبيه قبل الأذان بـ5 دقائق
-           */
-          if (
-            mode === 'before
+ 
+              p.write_text(s)
+ 
+              print("Android permissions added successfully.")
+ 
+          else:
+              print("Android permissions already exist.")
+ 
+          final = p.read_text()
+ 
+          required = [
+              "android.permission.VIBRATE",
+              "android.permission.POST_NOTIFICATIONS",
+              "android.permission.SCHEDULE_EXACT_ALARM",
+              "android.permission.USE_EXACT_ALARM",
+              "android.permission.RECEIVE_BOOT_COMPLETED"
+          ]
+ 
+          missing = [
+              permission
+              for permission in required
+              if permission not in final
+          ]
+ 
+          if missing:
+              print("ERROR: Missing permissions:")
+ 
+              for permission in missing:
+                  print(" - " + permission)
+ 
+              sys.exit(1)
+ 
+          print("All required permissions are present.")
+          PY
+ 
+      # =========================================================
+      # التحقق من أيقونة الإشعارات
+      # =========================================================
+      - name: Verify notification icon
+        run: |
+          set -e
+ 
+          test -f "android/app/src/main/res/drawable/ic_stat_azkar.png"
+ 
+          grep -q '"smallIcon": "ic_stat_azkar"' capacitor.config.json
+ 
+          echo "Notification small icon verified successfully."
+ 
+      # =========================================================
+      # بناء APK
+      # =========================================================
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew assembleDebug
+ 
+      # =========================================================
+      # رفع APK كـ Artifact
+      # =========================================================
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Azkar-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
