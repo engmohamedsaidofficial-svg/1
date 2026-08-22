@@ -3,7 +3,8 @@ name: Build Android APK
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -25,12 +26,11 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '17'
 
       - name: Install dependencies
         run: npm install
 
-      # إعداد Capacitor
       - name: Prepare Capacitor configuration
         run: |
           rm -f capacitor.config.ts
@@ -48,28 +48,521 @@ jobs:
           }
           EOF
 
-      # إضافة Android إذا لم يكن موجودًا
       - name: Add Android platform
         run: |
           if [ -d "android" ]; then
-            echo "Android platform already exists. Skipping cap add android."
+            echo "Android platform already exists."
           else
-            echo "Android platform not found. Adding it now..."
             npx cap add android
           fi
 
-      # إنشاء أيقونة التطبيق
-      - name: Generate app icon
+      # =========================================================
+      # إصلاح جدولة تنبيهات الأذان فقط
+      #
+      # المشكلة القديمة:
+      # - الجدولة كانت لليوم الحالي فقط
+      # - أي تنبيه بعد 24 ساعة كان يتم تجاهله
+      # - نفس ID كان يستخدم لكل يوم
+      #
+      # الحل:
+      # - استخدام الكاش الأسبوعي الموجود بالفعل في التطبيق
+      # - جدولة 7 أيام قادمة
+      # - ID مستقل لكل يوم + صلاة + نوع التنبيه
+      # =========================================================
+      - name: Patch prayer notification scheduling
         run: |
-          npx @capacitor/assets generate \
-            --android \
-            --iconBackgroundColor '#0b3d24' \
-            --iconBackgroundColorDark '#0b3d24'
+          python3 - <<'PY'
+          from pathlib import Path
 
-      # =========================================================
-      # تثبيت أيقونة الإشعارات
-      # =========================================================
-      - name: Install notification small icon
+          p = Path("www/index.html")
+          s = p.read_text(encoding="utf-8")
+
+          start = s.find("  function schedulePrayerAlerts(times){")
+          end = s.find("  function fireAdhanAlert(", start)
+
+          if start == -1:
+              raise SystemExit(
+                  "ERROR: schedulePrayerAlerts() was not found in index.html"
+              )
+
+          if end == -1:
+              raise SystemExit(
+                  "ERROR: fireAdhanAlert() was not found in index.html"
+              )
+
+          new_code = r'''  function nativeNotifId(dayIndex, prayerIndex, kind){
+    /*
+     * كل يوم له مجموعة IDs مستقلة.
+     *
+     * dayIndex:
+     * 0 = اليوم
+     * 1 = غدا
+     * ...
+     * 6 = بعد 6 أيام
+     *
+     * prayerIndex:
+     * 0 = فجر
+     * 1 = شروق
+     * 2 = ظهر
+     * 3 = عصر
+     * 4 = مغرب
+     * 5 = عشاء
+     *
+     * kind:
+     * before = قبل الأذان
+     * onTime = وقت الأذان
+     */
+    return 100000
+      + (dayIndex * 100)
+      + (prayerIndex * 10)
+      + (kind === 'before' ? 1 : 2);
+  }
+
+  function schedulePrayerAlerts(times){
+    clearPrayerAlertTimeouts();
+
+    if (!times) return;
+
+    var alerts = loadPrayerAlerts();
+
+    var hasAny = Object.keys(alerts).some(function(k){
+      return alerts[k] && alerts[k] !== 'off';
+    });
+
+    var native = isNativeApp();
+    var plugin = native ? getLocalNotifPlugin() : null;
+
+    if (plugin) ensureNotifChannels();
+
+    if (!hasAny) {
+      /*
+       * إلغاء كل تنبيهات الأذان الخاصة بالـ7 أيام.
+       */
+      if (plugin) {
+        var oldIds = [];
+
+        for (var d = 0; d < 7; d++) {
+          for (var pidx = 0; pidx < 6; pidx++) {
+            oldIds.push({
+              id: nativeNotifId(d, pidx, 'before')
+            });
+
+            oldIds.push({
+              id: nativeNotifId(d, pidx, 'onTime')
+            });
+          }
+        }
+
+        try {
+          plugin.cancel({
+            notifications: oldIds
+          });
+        } catch(e){}
+      }
+
+      return;
+    }
+
+    /*
+     * تجهيز تنبيهات الـ7 أيام من الكاش الموجود بالفعل.
+     *
+     * التطبيق عنده pt_weekly_cache ويجلب منه مواقيت
+     * الأيام السبعة القادمة.
+     */
+    var savedCity = null;
+    var weekly = null;
+
+    try {
+      savedCity = JSON.parse(
+        localStorage.getItem('pt_saved_city') || 'null'
+      );
+    } catch(e){}
+
+    try {
+      weekly = JSON.parse(
+        localStorage.getItem('pt_weekly_cache') || 'null'
+      );
+    } catch(e){
+      weekly = null;
+    }
+
+    var cityKey = null;
+
+    if (savedCity) {
+      try {
+        cityKey =
+          Number(savedCity.lat).toFixed(3) +
+          '_' +
+          Number(savedCity.lng).toFixed(3);
+      } catch(e){}
+    }
+
+    if (
+      !weekly ||
+      !cityKey ||
+      weekly.cityKey !== cityKey ||
+      !weekly.days
+    ) {
+      /*
+       * لو الكاش الأسبوعي غير متوفر، نستخدم اليوم الحالي فقط.
+       * عند إعادة فتح التطبيق سيتم تحديث الكاش.
+       */
+      weekly = null;
+    }
+
+    var now = new Date();
+
+    /*
+     * سنبني كل التنبيهات أولا ثم نرسلها دفعة واحدة.
+     */
+    var notifications = [];
+
+    for (var dayIndex = 0; dayIndex < 7; dayIndex++) {
+
+      var date = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + dayIndex
+      );
+
+      var dayKey = date.toDateString();
+
+      var dayTimes = null;
+
+      /*
+       * اليوم الحالي يمكن استخدام times مباشرة.
+       * الأيام التالية نأخذها من الكاش الأسبوعي.
+       */
+      if (weekly && weekly.days && weekly.days[dayKey]) {
+        dayTimes = weekly.days[dayKey];
+      } else if (dayIndex === 0) {
+        dayTimes = times;
+      }
+
+      if (!dayTimes) continue;
+
+      PRAYER_LIST.forEach(function(prayer, prayerIndex){
+
+        /*
+         * لا يوجد تنبيه للشروق.
+         */
+        if (prayer.key === 'sunrise') return;
+
+        var mode = alerts[prayer.key];
+
+        if (!mode || mode === 'off') return;
+
+        var t = dayTimes[prayer.key];
+
+        if (!t) return;
+
+        var prayerDate = new Date(
+          date.getFullYear(),
+          date.getMonth(),
+          date.getDate(),
+          t.h,
+          t.m,
+          0,
+          0
+        );
+
+        /*
+         * تنبيه قبل الأذان بـ5 دقائق.
+         */
+        if (mode === 'before' || mode === 'both') {
+
+          var beforeDate = new Date(
+            prayerDate.getTime() - (5 * 60 * 1000)
+          );
+
+          if (beforeDate.getTime() > Date.now()) {
+
+            notifications.push({
+              id: nativeNotifId(
+                dayIndex,
+                prayerIndex,
+                'before'
+              ),
+
+              title:
+                '⏰ اقترب أذان ' + prayer.name,
+
+              body:
+                'باقي ٥ دقائق على أذان ' + prayer.name,
+
+              schedule: {
+                at: beforeDate,
+                allowWhileIdle: true
+              },
+
+              sound: 'before5.mp3',
+
+              smallIcon: 'ic_stat_azkar'
+            });
+          }
+        }
+
+        /*
+         * تنبيه وقت الأذان.
+         */
+        if (mode === 'onTime' || mode === 'both') {
+
+          if (prayerDate.getTime() > Date.now()) {
+
+            notifications.push({
+              id: nativeNotifId(
+                dayIndex,
+                prayerIndex,
+                'onTime'
+              ),
+
+              title:
+                '🕌 حان الآن أذان ' + prayer.name,
+
+              body:
+                'حان الآن وقت صلاة ' + prayer.name,
+
+              schedule: {
+                at: prayerDate,
+                allowWhileIdle: true
+              },
+
+              sound: 'azan.mp3',
+
+              smallIcon: 'ic_stat_azkar'
+            });
+          }
+        }
+      });
+    }
+
+    /*
+     * في التطبيق الأصلي:
+     * نلغي IDs القديمة أولا ثم نعيد بناء الجدول.
+     */
+    if (plugin) {
+
+      var cancelIds = [];
+
+      for (var cd = 0; cd < 7; cd++) {
+        for (var cp = 0; cp < 6; cp++) {
+
+          cancelIds.push({
+            id: nativeNotifId(cd, cp, 'before')
+          });
+
+          cancelIds.push({
+            id: nativeNotifId(cd, cp, 'onTime')
+          });
+        }
+      }
+
+      try {
+
+        var cancelResult = plugin.cancel({
+          notifications: cancelIds
+        });
+
+        /*
+         * Capacitor يرجع Promise في النسخ الحديثة.
+         * ننتظر الإلغاء ثم نضع الجدول الجديد.
+         */
+        if (
+          cancelResult &&
+          typeof cancelResult.then === 'function'
+        ) {
+
+          cancelResult
+            .then(function(){
+
+              if (!notifications.length) return;
+
+              return plugin.schedule({
+                notifications: notifications
+              });
+
+            })
+            .catch(function(e){
+
+              console.log(
+                'Prayer notification reschedule error:',
+                e
+              );
+
+            });
+
+        } else {
+
+          /*
+           * توافق مع الإصدارات التي لا ترجع Promise.
+           */
+          if (notifications.length) {
+            plugin.schedule({
+              notifications: notifications
+            });
+          }
+
+        }
+
+      } catch(e) {
+
+        console.log(
+          'Prayer notification scheduling error:',
+          e
+        );
+
+      }
+
+    } else {
+
+      /*
+       * fallback للمتصفح فقط.
+       */
+      notifications.forEach(function(n){
+
+        var delay =
+          n.schedule.at.getTime() - Date.now();
+
+        if (delay <= 0) return;
+
+        var prayerName = '';
+
+        if (n.body.indexOf('٥ دقائق') !== -1) {
+          prayerName =
+            n.body
+              .replace('باقي ٥ دقائق على أذان ', '');
+        } else {
+          prayerName =
+            n.body
+              .replace('حان الآن وقت صلاة ', '');
+        }
+
+        var kind =
+          n.body.indexOf('٥ دقائق') !== -1
+            ? 'before'
+            : 'onTime';
+
+        var id = setTimeout(function(){
+
+          fireAdhanAlert(
+            prayerName,
+            kind
+          );
+
+        }, delay);
+
+        _prayerAlertTimeouts.push(id);
+      });
+    }
+  }
+
+  function scheduleOneAlert(
+    fireDate,
+    prayerName,
+    kind,
+    prayerIndex,
+    plugin,
+    customId
+  ){
+
+    /*
+     * هذه الدالة أصبحت احتياطية للتوافق مع أي استدعاء
+     * قديم داخل التطبيق.
+     *
+     * الجدولة الأساسية أصبحت تتم داخل
+     * schedulePrayerAlerts() لجدولة 7 أيام كاملة.
+     */
+
+    var ms =
+      fireDate.getTime() - Date.now();
+
+    if (ms <= 0) return;
+
+    if (plugin) {
+
+      try {
+
+        plugin.schedule({
+          notifications: [{
+            id:
+              customId ||
+              nativeNotifId(
+                0,
+                prayerIndex,
+                kind
+              ),
+
+            title:
+              kind === 'before'
+                ? ('⏰ اقترب أذان ' + prayerName)
+                : ('🕌 حان الآن أذان ' + prayerName),
+
+            body:
+              kind === 'before'
+                ? ('باقي ٥ دقائق على أذان ' + prayerName)
+                : ('حان الآن وقت صلاة ' + prayerName),
+
+            schedule: {
+              at: fireDate,
+              allowWhileIdle: true
+            },
+
+            sound:
+              kind === 'before'
+                ? 'before5.mp3'
+                : 'azan.mp3',
+
+            smallIcon: 'ic_stat_azkar'
+          }]
+        });
+
+      } catch(e){}
+
+    } else {
+
+      var id = setTimeout(function(){
+
+        fireAdhanAlert(
+          prayerName,
+          kind
+        );
+
+      }, ms);
+
+      _prayerAlertTimeouts.push(id);
+    }
+  }
+
+'''
+
+          s = s[:start] + new_code + s[end:]
+
+          p.write_text(s, encoding="utf-8")
+
+          print("==============================================")
+          print("Prayer notification scheduling patched.")
+          print("7 days scheduling enabled.")
+          print("Unique notification IDs enabled.")
+          print("Weekly prayer cache will be used.")
+          print("==============================================")
+          PY
+
+      - name: Verify prayer scheduling patch
+        run: |
+          set -e
+
+          grep -q "function nativeNotifId(dayIndex, prayerIndex, kind)" www/index.html
+          grep -q "for (var dayIndex = 0; dayIndex < 7; dayIndex++)" www/index.html
+          grep -q "pt_weekly_cache" www/index.html
+          grep -q "smallIcon: 'ic_stat_azkar'" www/index.html
+
+          echo "Prayer scheduling patch verified successfully."
+
+      - name: Copy web assets
+        run: |
+          npx cap sync android
+
+      - name: Install notification icon
         run: |
           set -e
 
@@ -80,96 +573,22 @@ jobs:
 
           mkdir -p android/app/src/main/res/drawable
 
-          cp "www/ic_stat_azkar.png" \
-             "android/app/src/main/res/drawable/ic_stat_azkar.png"
+          cp \
+            "www/ic_stat_azkar.png" \
+            "android/app/src/main/res/drawable/ic_stat_azkar.png"
 
-          echo "Notification icon installed successfully:"
-          ls -lh android/app/src/main/res/drawable/ic_stat_azkar.png
+          echo "Notification icon installed."
 
-      # مزامنة Capacitor
-      - name: Sync Capacitor
-        run: npx cap sync android
-
-      # =========================================================
-      # نسخ نغمات الصلاة إلى Android
-      # =========================================================
-      - name: Install prayer notification sounds
-        run: |
-          set -e
-
-          echo "Checking prayer audio files..."
-
-          if [ ! -f "www/audio/before5.mp3" ]; then
-            echo "ERROR: www/audio/before5.mp3 not found!"
-            exit 1
-          fi
-
-          if [ ! -f "www/audio/azan.mp3" ]; then
-            echo "ERROR: www/audio/azan.mp3 not found!"
-            exit 1
-          fi
-
-          mkdir -p android/app/src/main/res/raw
-
-          cp "www/audio/before5.mp3" \
-             "android/app/src/main/res/raw/before5.mp3"
-
-          cp "www/audio/azan.mp3" \
-             "android/app/src/main/res/raw/azan.mp3"
-
-          echo "Audio files copied successfully:"
-          ls -lh android/app/src/main/res/raw/before5.mp3
-          ls -lh android/app/src/main/res/raw/azan.mp3
-
-      # =========================================================
-      # صلاحيات الإشعارات والاهتزاز والمنبهات
-      # =========================================================
       - name: Add Android permissions
         run: |
           python3 - <<'PY'
-          import re
-          import sys
           from pathlib import Path
+          import re
 
           p = Path("android/app/src/main/AndroidManifest.xml")
-          s = p.read_text()
+          s = p.read_text(encoding="utf-8")
 
-          permissions = """
-              <uses-permission android:name="android.permission.VIBRATE" />
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-              <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
-              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-          """
-
-          required_permission = "android.permission.POST_NOTIFICATIONS"
-
-          if required_permission not in s:
-              match = re.search(r"<manifest\b[^>]*>", s)
-
-              if not match:
-                  print("ERROR: <manifest> tag not found")
-                  sys.exit(1)
-
-              insert_at = match.end()
-
-              s = (
-                  s[:insert_at]
-                  + "\n"
-                  + permissions
-                  + s[insert_at:]
-              )
-
-              p.write_text(s)
-
-              print("Android permissions added successfully.")
-
-          else:
-              print("Android permissions already exist.")
-
-          final = p.read_text()
-
-          required = [
+          permissions = [
               "android.permission.VIBRATE",
               "android.permission.POST_NOTIFICATIONS",
               "android.permission.SCHEDULE_EXACT_ALARM",
@@ -177,46 +596,46 @@ jobs:
               "android.permission.RECEIVE_BOOT_COMPLETED"
           ]
 
-          missing = [
-              permission
-              for permission in required
-              if permission not in final
-          ]
+          manifest_match = re.search(
+              r"<manifest\b[^>]*>",
+              s
+          )
+
+          if not manifest_match:
+              raise SystemExit(
+                  "ERROR: AndroidManifest.xml <manifest> not found"
+              )
+
+          missing = []
+
+          for permission in permissions:
+              if permission not in s:
+                  missing.append(
+                      f'    <uses-permission android:name="{permission}" />'
+                  )
 
           if missing:
-              print("ERROR: Missing permissions:")
+              insert_at = manifest_match.end()
 
-              for permission in missing:
-                  print(" - " + permission)
+              s = (
+                  s[:insert_at]
+                  + "\n"
+                  + "\n".join(missing)
+                  + "\n"
+                  + s[insert_at:]
+              )
 
-              sys.exit(1)
+              p.write_text(s, encoding="utf-8")
 
-          print("All required permissions are present.")
+          print("Android permissions verified.")
           PY
 
-      # =========================================================
-      # التحقق من أيقونة الإشعارات
-      # =========================================================
-      - name: Verify notification icon
-        run: |
-          set -e
-
-          test -f "android/app/src/main/res/drawable/ic_stat_azkar.png"
-
-          grep -q '"smallIcon": "ic_stat_azkar"' capacitor.config.json
-
-          echo "Notification small icon verified successfully."
-
-      # =========================================================
-      # بناء APK
-      # =========================================================
       - name: Build APK
         working-directory: android
-        run: ./gradlew assembleDebug
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
 
-      # =========================================================
-      # رفع APK كـ Artifact
-      # =========================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
