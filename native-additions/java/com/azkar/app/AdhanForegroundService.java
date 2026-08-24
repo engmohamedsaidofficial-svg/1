@@ -16,8 +16,10 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 
 /**
  * بيشغل الأذان كامل باستخدام MediaPlayer + AudioAttributes(USAGE_ALARM).
@@ -83,9 +85,19 @@ public class AdhanForegroundService extends Service {
         };
         try {
             IntentFilter filter = new IntentFilter("android.media.VOLUME_CHANGED_ACTION");
-            registerReceiver(volumeKeyReceiver, filter);
+            // من أندرويد 13 (API 33) لازم تتحدد صراحة RECEIVER_EXPORTED/RECEIVER_NOT_EXPORTED
+            // وإلا الـ registerReceiver بيرمي SecurityException وقت التشغيل.
+            // ContextCompat.registerReceiver بتتعامل مع الفرق بين الإصدارات القديمة والحديثة تلقائيًا.
+            ContextCompat.registerReceiver(
+                this,
+                volumeKeyReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            );
             volumeReceiverRegistered = true;
-        } catch (Exception e) {}
+        } catch (Exception e) {
+            Log.e("AdhanForegroundService", "فشل تسجيل مستقبل زرار الصوت", e);
+        }
     }
 
     private void unregisterVolumeKeyReceiver() {
@@ -171,4 +183,3 @@ public class AdhanForegroundService extends Service {
         super.onDestroy();
     }
 }
-
