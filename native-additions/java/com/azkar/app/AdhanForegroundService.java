@@ -5,9 +5,12 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.media.AudioAttributes;
+import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
@@ -20,6 +23,7 @@ import androidx.core.app.NotificationCompat;
  * بيشغل الأذان كامل باستخدام MediaPlayer + AudioAttributes(USAGE_ALARM).
  * الفرق عن صوت الإشعار العادي: ده بيتجاوز Doze / توفير البطارية / قيود MIUI-Samsung
  * وبيكمل لحد ما يخلص الملف، تمامًا زي منبه الموبايل.
+ * كمان بيوقف نفسه لو المستخدم دوس أي زرار صوت (رفع/خفض) وقت التشغيل.
  */
 public class AdhanForegroundService extends Service {
 
@@ -32,6 +36,8 @@ public class AdhanForegroundService extends Service {
 
     private MediaPlayer mediaPlayer;
     private PowerManager.WakeLock wakeLock;
+    private BroadcastReceiver volumeKeyReceiver;
+    private boolean volumeReceiverRegistered = false;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -54,9 +60,39 @@ public class AdhanForegroundService extends Service {
 
         acquireWakeLock();
         startForeground(NOTIF_ID, buildNotification(title, body));
+        registerVolumeKeyReceiver();
         playAdhan(soundResName);
 
         return START_NOT_STICKY;
+    }
+
+    /* ===== إيقاف الأذان بمجرد ما المستخدم يدوس زرار رفع أو خفض الصوت ===== */
+    /* أندرويد بيبعث VOLUME_CHANGED_ACTION لما مستوى أي قناة صوت يتغيّر، حتى والشاشة مقفولة، */
+    /* طالما التطبيق (الـ Service) شغال في الخلفية. بنفلتر بس على قناة الـ ALARM عشان مانوقفش */
+    /* الأذان غلط لو حد غيّر صوت المكالمة أو الميديا لسبب تاني. */
+    private void registerVolumeKeyReceiver() {
+        if (volumeReceiverRegistered) return;
+        volumeKeyReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                int streamType = intent.getIntExtra("android.media.EXTRA_VOLUME_STREAM_TYPE", -1);
+                if (streamType == AudioManager.STREAM_ALARM || streamType == -1) {
+                    stopSelfSafely();
+                }
+            }
+        };
+        try {
+            IntentFilter filter = new IntentFilter("android.media.VOLUME_CHANGED_ACTION");
+            registerReceiver(volumeKeyReceiver, filter);
+            volumeReceiverRegistered = true;
+        } catch (Exception e) {}
+    }
+
+    private void unregisterVolumeKeyReceiver() {
+        if (!volumeReceiverRegistered) return;
+        try { unregisterReceiver(volumeKeyReceiver); } catch (Exception e) {}
+        volumeReceiverRegistered = false;
+        volumeKeyReceiver = null;
     }
 
     private void acquireWakeLock() {
@@ -112,7 +148,7 @@ public class AdhanForegroundService extends Service {
 
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
-            .setContentText(body)
+            .setContentText(body + " — دوس أي زرار صوت للإيقاف")
             .setSmallIcon(getApplicationInfo().icon)
             .setOngoing(true)
             .addAction(0, "إيقاف", stopPending)
@@ -123,6 +159,7 @@ public class AdhanForegroundService extends Service {
         try { if (mediaPlayer != null) mediaPlayer.stop(); } catch (Exception e) {}
         try { if (mediaPlayer != null) mediaPlayer.release(); } catch (Exception e) {}
         mediaPlayer = null;
+        unregisterVolumeKeyReceiver();
         try { if (wakeLock != null && wakeLock.isHeld()) wakeLock.release(); } catch (Exception e) {}
         try { stopForeground(true); } catch (Exception e) {}
         stopSelf();
@@ -134,3 +171,4 @@ public class AdhanForegroundService extends Service {
         super.onDestroy();
     }
 }
+
