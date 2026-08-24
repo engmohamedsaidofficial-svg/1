@@ -122,6 +122,96 @@ jobs:
           ls -lh android/app/src/main/res/raw/azan.mp3
  
       # =========================================================
+      # إضافة الـ native plugin بتاع تشغيل الأذان كامل (Foreground Service + AlarmManager)
+      # =========================================================
+      - name: Install Adhan foreground-service plugin
+        run: |
+          set -e
+          mkdir -p android/app/src/main/java/com/azkar/app
+          cp native-additions/java/com/azkar/app/AdhanForegroundService.kt android/app/src/main/java/com/azkar/app/
+          cp native-additions/java/com/azkar/app/AdhanAlarmReceiver.kt android/app/src/main/java/com/azkar/app/
+          cp native-additions/java/com/azkar/app/AdhanAlarmPlugin.kt android/app/src/main/java/com/azkar/app/
+          echo "Adhan plugin sources copied."
+ 
+      # =========================================================
+      # تسجيل الـ plugin في MainActivity + إضافة الـ service/receiver في المانيفست
+      # =========================================================
+      - name: Register Adhan plugin
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+ 
+          # ---- 1) MainActivity: تسجيل الـ plugin ----
+          main_activity = None
+          for p in Path("android/app/src/main/java").rglob("MainActivity.java"):
+              main_activity = p
+              break
+          if main_activity is None:
+              for p in Path("android/app/src/main/java").rglob("MainActivity.kt"):
+                  main_activity = p
+                  break
+          if main_activity is None:
+              raise SystemExit("ERROR: MainActivity not found")
+ 
+          s = main_activity.read_text()
+          if "AdhanAlarmPlugin" not in s:
+              if main_activity.suffix == ".java":
+                  s = s.replace(
+                      "public class MainActivity extends BridgeActivity {",
+                      "public class MainActivity extends BridgeActivity {\n"
+                      "  @Override\n"
+                      "  public void onCreate(android.os.Bundle savedInstanceState) {\n"
+                      "    registerPlugin(com.azkar.app.AdhanAlarmPlugin.class);\n"
+                      "    super.onCreate(savedInstanceState);\n"
+                      "  }\n"
+                  )
+              else:
+                  s = s.replace(
+                      "class MainActivity : BridgeActivity() {",
+                      "class MainActivity : BridgeActivity() {\n"
+                      "  override fun onCreate(savedInstanceState: android.os.Bundle?) {\n"
+                      "    registerPlugin(com.azkar.app.AdhanAlarmPlugin::class.java)\n"
+                      "    super.onCreate(savedInstanceState)\n"
+                      "  }\n"
+                  )
+              main_activity.write_text(s)
+              print("MainActivity patched.")
+          else:
+              print("MainActivity already patched.")
+ 
+          # ---- 2) AndroidManifest: صلاحيات + service + receiver ----
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          m = manifest.read_text()
+ 
+          extra_permissions = """
+              <uses-permission android:name=\"android.permission.WAKE_LOCK\" />
+              <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE\" />
+              <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK\" />
+          """
+          if "FOREGROUND_SERVICE_MEDIA_PLAYBACK" not in m:
+              match = re.search(r"<manifest\b[^>]*>", m)
+              insert_at = match.end()
+              m = m[:insert_at] + "\n" + extra_permissions + m[insert_at:]
+              print("Extra permissions added.")
+ 
+          if "AdhanForegroundService" not in m:
+              component_block = """
+              <service
+                  android:name=\".AdhanForegroundService\"
+                  android:foregroundServiceType=\"mediaPlayback\"
+                  android:exported=\"false\" />
+              <receiver
+                  android:name=\".AdhanAlarmReceiver\"
+                  android:exported=\"false\" />
+          """
+              m = m.replace("</application>", component_block + "    </application>")
+              print("Service/receiver declared.")
+ 
+          manifest.write_text(m)
+          PY
+ 
+      # =========================================================
       # صلاحيات الإشعارات والاهتزاز والمنبهات
       # =========================================================
       - name: Add Android permissions
