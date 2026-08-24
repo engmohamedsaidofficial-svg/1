@@ -17,6 +17,7 @@ import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.util.Log;
+import android.widget.Toast;
 
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
@@ -80,6 +81,7 @@ public class AdhanForegroundService extends Service {
             public void onReceive(Context context, Intent intent) {
                 int streamType = intent.getIntExtra("android.media.EXTRA_VOLUME_STREAM_TYPE", -1);
                 Log.d("AdhanForegroundService", "استقبلنا VOLUME_CHANGED_ACTION، streamType=" + streamType + " (STREAM_ALARM=" + AudioManager.STREAM_ALARM + ")");
+                Toast.makeText(context, "🔊 وصل زرار الصوت! streamType=" + streamType, Toast.LENGTH_SHORT).show();
                 if (streamType == AudioManager.STREAM_ALARM || streamType == -1) {
                     Log.d("AdhanForegroundService", "هيتوقف الأذان دلوقتي بسبب زرار الصوت");
                     stopSelfSafely();
@@ -99,8 +101,10 @@ public class AdhanForegroundService extends Service {
             );
             volumeReceiverRegistered = true;
             Log.d("AdhanForegroundService", "تم تسجيل مستقبل زرار الصوت بنجاح");
+            Toast.makeText(this, "✓ جاهز لإيقاف الأذان بزرار الصوت", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
             Log.e("AdhanForegroundService", "فشل تسجيل مستقبل زرار الصوت", e);
+            Toast.makeText(this, "✗ فشل تسجيل مستقبل زرار الصوت: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 
@@ -187,4 +191,3 @@ public class AdhanForegroundService extends Service {
         super.onDestroy();
     }
 }
-
