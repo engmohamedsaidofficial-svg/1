@@ -10,7 +10,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.media.AudioAttributes;
-import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
@@ -80,12 +79,11 @@ public class AdhanForegroundService extends Service {
             @Override
             public void onReceive(Context context, Intent intent) {
                 int streamType = intent.getIntExtra("android.media.EXTRA_VOLUME_STREAM_TYPE", -1);
-                Log.d("AdhanForegroundService", "استقبلنا VOLUME_CHANGED_ACTION، streamType=" + streamType + " (STREAM_ALARM=" + AudioManager.STREAM_ALARM + ")");
-                Toast.makeText(context, "🔊 وصل زرار الصوت! streamType=" + streamType, Toast.LENGTH_SHORT).show();
-                if (streamType == AudioManager.STREAM_ALARM || streamType == -1) {
-                    Log.d("AdhanForegroundService", "هيتوقف الأذان دلوقتي بسبب زرار الصوت");
-                    stopSelfSafely();
-                }
+                Log.d("AdhanForegroundService", "استقبلنا VOLUME_CHANGED_ACTION، streamType=" + streamType + " — هيتوقف الأذان");
+                // أي تغيير في أي قناة صوت وقت تشغيل الأذان = المستخدم دوس زرار الصوت = وقف فورًا.
+                // (مش بنفلتر على STREAM_ALARM بس لأن أندرويد أحيانًا بيوجّه الزرار لقناة تانية
+                // لما الشاشة مقفولة أو التطبيق مش في الـ foreground)
+                stopSelfSafely();
             }
         };
         try {
