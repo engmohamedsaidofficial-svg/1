@@ -128,9 +128,9 @@ jobs:
         run: |
           set -e
           mkdir -p android/app/src/main/java/com/azkar/app
-          cp native-additions/java/com/azkar/app/AdhanForegroundService.kt android/app/src/main/java/com/azkar/app/
-          cp native-additions/java/com/azkar/app/AdhanAlarmReceiver.kt android/app/src/main/java/com/azkar/app/
-          cp native-additions/java/com/azkar/app/AdhanAlarmPlugin.kt android/app/src/main/java/com/azkar/app/
+          cp native-additions/java/com/azkar/app/AdhanForegroundService.java android/app/src/main/java/com/azkar/app/
+          cp native-additions/java/com/azkar/app/AdhanAlarmReceiver.java android/app/src/main/java/com/azkar/app/
+          cp native-additions/java/com/azkar/app/AdhanAlarmPlugin.java android/app/src/main/java/com/azkar/app/
           echo "Adhan plugin sources copied."
  
       # =========================================================
